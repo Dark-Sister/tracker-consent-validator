@@ -1,0 +1,82 @@
+.container {
+  width: 340px;
+  font-family: Arial, sans-serif;
+  padding: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.section {
+  margin: 10px 0;
+  padding: 8px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0;
+  gap: 8px;
+}
+
+.label {
+  font-size: 12px;
+  color: #555;
+}
+
+.value {
+  font-size: 12px;
+}
+
+.subtitle {
+  font-size: 12px;
+  font-weight: bold;
+  margin-bottom: 6px;
+}
+
+.list {
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.button {
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid #2b6cb0;
+  background: #2b6cb0;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.button.secondary {
+  background: #fff;
+  color: #2b6cb0;
+}
+
+.toggle {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid #888;
+  cursor: pointer;
+}
+
+select,
+input[type="number"] {
+  font-size: 12px;
+  width: 120px;
+}
