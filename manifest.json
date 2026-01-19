@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Tracker Consent Validator",
+  "version": "1.0.0",
+  "description": "Detect privacy violations when third-party trackers fire before consent.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "webRequest",
+    "downloads"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tracker Consent Validator"
+  }
+}
