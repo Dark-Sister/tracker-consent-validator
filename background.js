@@ -4,7 +4,9 @@ importScripts("tracker-database.js");
 const STORAGE_KEYS = {
   SETTINGS: "settings",
   TAB_DATA: "tabData",
-  CUSTOM_TRACKERS: "customTrackerDb"
+  CUSTOM_TRACKERS: "customTrackerDb",
+  LLM_CACHE: "llmCache",
+  POLICY_RATE_LIMIT: "policyRateLimit"
 };
 
 const DEFAULT_SETTINGS = {
@@ -12,12 +14,17 @@ const DEFAULT_SETTINGS = {
   bannerPolicy: "eu_ca", // always | eu_ca | off
   retentionDays: 7,
   maxPagesPerDomain: 50,
-  allowlist: DEFAULT_ALLOWLIST
+  allowlist: DEFAULT_ALLOWLIST,
+  llmTrackerEnabled: false,
+  policyAnalysisEnabled: false,
+  anthropicApiKey: ""
 };
 
 const state = {
   settings: { ...DEFAULT_SETTINGS },
-  tabData: {}
+  tabData: {},
+  llmCache: {},
+  policyRateLimit: {}
 };
 
 function now() {
@@ -61,9 +68,13 @@ function matchesAllowlist(requestUrl) {
 }
 
 function loadSettings() {
-  chrome.storage.local.get([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TAB_DATA], (res) => {
+  chrome.storage.local.get(
+    [STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TAB_DATA, STORAGE_KEYS.LLM_CACHE, STORAGE_KEYS.POLICY_RATE_LIMIT],
+    (res) => {
     state.settings = { ...DEFAULT_SETTINGS, ...(res[STORAGE_KEYS.SETTINGS] || {}) };
     state.tabData = res[STORAGE_KEYS.TAB_DATA] || {};
+    state.llmCache = res[STORAGE_KEYS.LLM_CACHE] || {};
+    state.policyRateLimit = res[STORAGE_KEYS.POLICY_RATE_LIMIT] || {};
   });
 }
 
@@ -73,6 +84,14 @@ function saveSettings() {
 
 function saveTabData() {
   chrome.storage.local.set({ [STORAGE_KEYS.TAB_DATA]: state.tabData });
+}
+
+function saveLlmCache() {
+  chrome.storage.local.set({ [STORAGE_KEYS.LLM_CACHE]: state.llmCache });
+}
+
+function savePolicyRateLimit() {
+  chrome.storage.local.set({ [STORAGE_KEYS.POLICY_RATE_LIMIT]: state.policyRateLimit });
 }
 
 function getTrackerDb(cb) {
@@ -119,6 +138,15 @@ function recordViolation(tabData, violation) {
   tabData.violations.push(violation);
 }
 
+function findTrackerEntryByRequestId(tabData, requestId) {
+  if (!tabData || !requestId) return null;
+  for (let i = tabData.trackers.length - 1; i >= 0; i -= 1) {
+    const t = tabData.trackers[i];
+    if (t.requestId === requestId) return t;
+  }
+  return null;
+}
+
 function classifyViolation(trackerInfo, type) {
   const severity = trackerInfo?.severity || "medium";
   return { type, severity };
@@ -143,6 +171,99 @@ function updateBadge(tabId) {
     chrome.action.setBadgeText({ tabId, text: String(count) });
     chrome.action.setBadgeBackgroundColor({ tabId, color: "#FF0000" });
   }
+}
+
+function hashString(input) {
+  let hash = 5381;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 33) ^ input.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function getLlmCache(key) {
+  return state.llmCache[key] || null;
+}
+
+function setLlmCache(key, value) {
+  state.llmCache[key] = { value, ts: now() };
+  // Simple bounded cache: keep last 500 entries
+  const entries = Object.entries(state.llmCache);
+  if (entries.length > 500) {
+    entries.sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+    for (const [k] of entries.slice(0, entries.length - 500)) {
+      delete state.llmCache[k];
+    }
+  }
+  saveLlmCache();
+}
+
+async function callClaudeTrackerAnalysis(payload, apiKey) {
+  const body = {
+    model: "claude-sonnet-4-5",
+    max_tokens: 512,
+    temperature: 0.0,
+    messages: [
+      {
+        role: "user",
+        content:
+          "Analyze if this tracking request violates the user's privacy consent settings: " +
+          payload.consent +
+          ". Request details: " +
+          payload.request +
+          '. Return JSON with: {"violates": boolean, "reason": string, "severity": "low"|"medium"|"high"}'
+      }
+    ],
+  };
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    throw new Error(`Claude error ${resp.status}`);
+  }
+  const data = await resp.json();
+  const content = data?.content?.[0]?.text || "{}";
+  return JSON.parse(content);
+}
+
+async function callClaudePolicyAnalysis(payload, apiKey) {
+  const body = {
+    model: "claude-sonnet-4-5",
+    max_tokens: 1024,
+    temperature: 0.0,
+    messages: [
+      {
+        role: "user",
+        content:
+          "Compare stated privacy policy with actual tracking behavior. Policy: " +
+          payload.policy +
+          ". Observed trackers: " +
+          payload.trackers +
+          '. Return JSON: {"contradictions":[{"claim":string,"actual_behavior":string,"severity":string}],"deception_score":0-100}'
+      }
+    ]
+  };
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    throw new Error(`Claude error ${resp.status}`);
+  }
+  const data = await resp.json();
+  const content = data?.content?.[0]?.text || "{}";
+  return JSON.parse(content);
 }
 
 function cleanupOldData() {
@@ -240,12 +361,17 @@ chrome.webRequest.onBeforeRequest.addListener(
         domain: new URL(url).hostname,
         url,
         firedAt,
+        requestId: details.requestId,
+        requestType: details.type,
+        method: details.method,
         category: trackerMatch?.category || "unknown",
         severity: trackerMatch?.severity || "medium",
         trackerName: trackerMatch?.name || "unknown",
         violation: null,
         timeDelta: null,
-        piiDetected: []
+        piiDetected: [],
+        headers: [],
+        cookies: ""
       };
 
       // Violation logic
@@ -291,68 +417,277 @@ chrome.webRequest.onBeforeRequest.addListener(
       tabData.trackers.push(entry);
       saveTabData();
       updateBadge(details.tabId);
+
     });
   },
   { urls: ["<all_urls>"] },
   ["requestBody"]
 );
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  const tabId = sender.tab?.id;
-  if (!tabId) return;
-  const tabData = ensureTab(tabId);
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    if (!shouldProcessTab(details.tabId)) return;
+    const tabData = ensureTab(details.tabId);
+    const pageUrl = tabData.url || "";
+    const url = details.url;
 
-  if (msg.type === "PAGE_LOAD") {
-    tabData.url = msg.url || tabData.url;
-    tabData.pageLoadTime = msg.timestamp || tabData.pageLoadTime;
-    saveTabData();
-  }
+    if (!pageUrl || !isThirdParty(url, pageUrl)) return;
+    if (matchesAllowlist(url)) return;
 
-  if (msg.type === "CONSENT_STATE") {
-    const cs = tabData.consentBanner;
-    if (msg.detected) {
-      cs.detected = true;
-      cs.platform = msg.platform || cs.platform;
-      cs.detectedAt = cs.detectedAt || msg.timestamp || now();
-    }
-    if (msg.userAction) {
-      cs.userAction = msg.userAction;
-      cs.actionAt = msg.timestamp || now();
-    }
-    if (msg.inferred) {
-      cs.inferred = true;
-    }
-    saveTabData();
-    updateBadge(tabId);
-  }
+    const entry = findTrackerEntryByRequestId(tabData, details.requestId);
+    if (!entry) return;
 
-  if (msg.type === "SETTINGS_UPDATE") {
-    state.settings = { ...state.settings, ...(msg.settings || {}) };
-    saveSettings();
-    updateBadge(tabId);
-  }
+    entry.headers = details.requestHeaders || [];
+    const cookieHeader = (details.requestHeaders || []).find(
+      (h) => h.name && h.name.toLowerCase() === "cookie"
+    );
+    entry.cookies = cookieHeader?.value || "";
 
-  if (msg.type === "CLEAR_TAB") {
-    delete state.tabData[tabId];
-    saveTabData();
-    updateBadge(tabId);
-  }
-
-  if (msg.type === "GET_STATE") {
-    sendResponse({
-      settings: state.settings,
-      tabData: tabData
-    });
-  }
-
-  if (msg.type === "INJECT_CONTENT") {
-    const targetTabId = msg.tabId || tabId;
-    chrome.tabs.get(targetTabId, (tab) => {
-      if (tab?.url) {
-        ensureContentScript(targetTabId, tab.url);
+    // LLM enhanced analysis (opt-in)
+    if (state.settings.llmTrackerEnabled && state.settings.anthropicApiKey && !entry.llmAnalyzed) {
+      entry.llmAnalyzed = true;
+      try {
+        const consentSummary = JSON.stringify({
+          bannerPolicy: state.settings.bannerPolicy,
+          detected: tabData.consentBanner.detected,
+          action: tabData.consentBanner.userAction
+        });
+        const requestSummary = JSON.stringify({
+          url,
+          method: details.method,
+          type: details.type,
+          cookies: entry.cookies,
+          headers: entry.headers
+        });
+        const cacheKey = hashString(consentSummary + requestSummary);
+        const cached = getLlmCache(cacheKey);
+        const applyResult = (result) => {
+          if (result?.violates) {
+            recordViolation(tabData, {
+              type: "LLM_ANALYSIS",
+              severity: result.severity || "medium",
+              tracker: entry.trackerName,
+              details: result.reason || "LLM flagged violation",
+              timestamp: now()
+            });
+          }
+        };
+        if (cached) {
+          applyResult(cached.value);
+        } else {
+          callClaudeTrackerAnalysis(
+            { consent: consentSummary, request: requestSummary },
+            state.settings.anthropicApiKey
+          )
+            .then((result) => {
+              setLlmCache(cacheKey, result);
+              applyResult(result);
+              saveTabData();
+              updateBadge(details.tabId);
+            })
+            .catch(() => {
+              // Fallback to rule-based only
+            });
+        }
+      } catch (e) {
+        // Ignore LLM errors; keep rule-based detection
       }
+    }
+  },
+  { urls: ["<all_urls>"] },
+  ["requestHeaders", "extraHeaders"]
+);
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const resolveTabId = (cb) => {
+    if (sender?.tab?.id) {
+      cb(sender.tab.id);
+      return;
+    }
+    if (typeof msg.tabId === "number") {
+      cb(msg.tabId);
+      return;
+    }
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      cb(tabs?.[0]?.id);
     });
-  }
+  };
+
+  resolveTabId((tabId) => {
+    if (!tabId && msg.type !== "SETTINGS_UPDATE") {
+      sendResponse?.({ ok: false, error: "No active tab" });
+      return;
+    }
+    const tabData = tabId ? ensureTab(tabId) : null;
+
+    if (msg.type === "PAGE_LOAD" && tabData) {
+      tabData.url = msg.url || tabData.url;
+      tabData.pageLoadTime = msg.timestamp || tabData.pageLoadTime;
+      saveTabData();
+    }
+
+    if (msg.type === "CONSENT_STATE" && tabData) {
+      const cs = tabData.consentBanner;
+      if (msg.detected) {
+        cs.detected = true;
+        cs.platform = msg.platform || cs.platform;
+        cs.detectedAt = cs.detectedAt || msg.timestamp || now();
+      }
+      if (msg.userAction) {
+        cs.userAction = msg.userAction;
+        cs.actionAt = msg.timestamp || now();
+      }
+      if (msg.inferred) {
+        cs.inferred = true;
+      }
+      saveTabData();
+      updateBadge(tabId);
+    }
+
+    if (msg.type === "SETTINGS_UPDATE") {
+      state.settings = { ...state.settings, ...(msg.settings || {}) };
+      saveSettings();
+      if (tabId) updateBadge(tabId);
+    }
+
+    if (msg.type === "CLEAR_TAB" && tabData) {
+      delete state.tabData[tabId];
+      saveTabData();
+      updateBadge(tabId);
+    }
+
+    if (msg.type === "GET_STATE") {
+      sendResponse?.({
+        settings: state.settings,
+        tabData: tabData || {}
+      });
+    }
+
+    if (msg.type === "INJECT_CONTENT") {
+      const targetTabId = msg.tabId || tabId;
+      chrome.tabs.get(targetTabId, (tab) => {
+        if (tab?.url) {
+          ensureContentScript(targetTabId, tab.url);
+        }
+      });
+    }
+
+    if (msg.type === "RUN_POLICY_ANALYSIS") {
+      const targetTabId = msg.tabId || tabId;
+      chrome.tabs.get(targetTabId, (tab) => {
+      if (!tab?.url) {
+        if (tabId) {
+          const td = ensureTab(tabId);
+          td.policyAnalysisStatus = { status: "error", message: "No active URL", at: now() };
+          saveTabData();
+        }
+        sendResponse({ ok: false, error: "No active URL" });
+        return;
+      }
+      const domain = getETLDPlus1(new URL(tab.url).hostname);
+      const lastRun = state.policyRateLimit[domain] || 0;
+      if (now() - lastRun < 24 * 60 * 60 * 1000) {
+        if (tabId) {
+          const td = ensureTab(tabId);
+          td.policyAnalysisStatus = { status: "error", message: "Already ran today.", at: now() };
+          saveTabData();
+        }
+        sendResponse({ ok: false, error: "Policy analysis already ran for this domain today." });
+        return;
+      }
+      if (!state.settings.policyAnalysisEnabled) {
+        if (tabId) {
+          const td = ensureTab(tabId);
+          td.policyAnalysisStatus = { status: "error", message: "Policy analysis disabled.", at: now() };
+          saveTabData();
+        }
+        sendResponse({ ok: false, error: "Policy analysis is disabled in settings." });
+        return;
+      }
+      if (!state.settings.anthropicApiKey) {
+        if (tabId) {
+          const td = ensureTab(tabId);
+          td.policyAnalysisStatus = { status: "error", message: "Missing Claude API key.", at: now() };
+          saveTabData();
+        }
+        sendResponse({ ok: false, error: "Missing Claude API key." });
+        return;
+      }
+
+      // Ensure content script exists, then ask it to scrape policy text
+      ensureContentScript(targetTabId, tab.url);
+      chrome.tabs.sendMessage(
+        targetTabId,
+        { type: "SCRAPE_POLICY" },
+        (policyRes) => {
+          if (chrome.runtime.lastError) {
+            if (tabId) {
+              const td = ensureTab(tabId);
+              td.policyAnalysisStatus = { status: "error", message: "Enable this site first.", at: now() };
+              saveTabData();
+            }
+            sendResponse({ ok: false, error: "Content script not available. Enable this site first." });
+            return;
+          }
+          if (!policyRes?.policyText) {
+            if (tabId) {
+              const td = ensureTab(tabId);
+              td.policyAnalysisStatus = { status: "error", message: "No privacy policy found.", at: now() };
+              saveTabData();
+            }
+            sendResponse({ ok: false, error: "No privacy policy found." });
+            return;
+          }
+
+          const startTime = now();
+          if (tabId) {
+            const td = ensureTab(tabId);
+            td.policyAnalysisStatus = { status: "running", message: "Running...", at: now() };
+            saveTabData();
+          }
+          sendResponse({ ok: true, status: "running" });
+
+          setTimeout(() => {
+            const td = ensureTab(targetTabId);
+            const observed = td.trackers.filter((t) => t.firedAt >= startTime);
+            const trackerList = observed.map((t) => ({
+              domain: t.domain,
+              tracker: t.trackerName,
+              category: t.category,
+              severity: t.severity
+            }));
+            callClaudePolicyAnalysis(
+              {
+                policy: policyRes.policyText.slice(0, 20000),
+                trackers: JSON.stringify(trackerList)
+              },
+              state.settings.anthropicApiKey
+            )
+              .then((result) => {
+                td.policyAnalysis = {
+                  runAt: now(),
+                  policyUrl: policyRes.policyUrl,
+                  contradictions: result.contradictions || [],
+                  deceptionScore: result.deception_score || 0
+                };
+                td.policyAnalysisStatus = { status: "done", message: "Complete.", at: now() };
+                state.policyRateLimit[domain] = now();
+                savePolicyRateLimit();
+                saveTabData();
+                updateBadge(targetTabId);
+              })
+              .catch(() => {
+                td.policyAnalysisStatus = { status: "error", message: "Claude API error.", at: now() };
+                saveTabData();
+                // Ignore LLM errors
+              });
+          }, 30000);
+        }
+      );
+    });
+    }
+  });
+  return true;
 });
 
 setInterval(cleanupOldData, 60 * 60 * 1000);
