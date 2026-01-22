@@ -10,6 +10,9 @@
     "webRequest",
     "downloads"
   ],
+  "host_permissions": [
+    "https://api.anthropic.com/*"
+  ],
   "optional_host_permissions": [
     "<all_urls>"
   ],
