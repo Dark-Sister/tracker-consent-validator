@@ -41,9 +41,30 @@
       </div>
 
       <div class="section">
+        <div class="subtitle">LLM Analysis</div>
+        <div class="row">
+          <span class="label">Tracker LLM (Claude)</span>
+          <input id="llmTrackerToggle" type="checkbox" />
+        </div>
+      </div>
+
+      <div class="section">
         <button id="exportReport" class="button">Export JSON Report</button>
         <label class="button secondary" for="importFile">Import Tracker DB</label>
         <input id="importFile" type="file" accept=".json" hidden />
+      </div>
+
+      <div class="section">
+        <div class="subtitle">Policy Analysis (Claude)</div>
+        <div class="row">
+          <span class="label">Enable policy analysis</span>
+          <input id="policyToggle" type="checkbox" />
+        </div>
+        <div class="row">
+          <button id="runPolicy" class="button secondary">Run Policy Analysis</button>
+        </div>
+        <div id="policyStatus" class="status"></div>
+        <div id="policyResults" class="list"></div>
       </div>
 
       <div class="section">
@@ -63,6 +84,17 @@
         <div class="row">
           <span class="label">Max pages/domain</span>
           <input id="maxPages" type="number" min="10" max="500" />
+        </div>
+        <div class="row">
+          <span class="label">Claude API Key</span>
+          <input id="anthropicKey" type="password" placeholder="sk-ant-..." />
+        </div>
+        <div class="row">
+          <button id="saveKeys" class="button secondary">Save API Keys</button>
+        </div>
+        <div class="warning">
+          API keys and request data are sent to external LLM providers when enabled.
+          Use only on data you are authorized to share.
         </div>
       </div>
     </div>
