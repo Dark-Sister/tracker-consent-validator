@@ -1,5 +1,3 @@
-/* global DEFAULT_TRACKER_DB */
-
 const $ = (id) => document.getElementById(id);
 
 async function getActiveTab() {
@@ -35,7 +33,8 @@ function renderViolations(list) {
   for (const v of list) {
     const item = document.createElement("div");
     item.style.marginBottom = "6px";
-    item.innerHTML = `<strong style="color:${severityColor(v.severity)}">${v.severity.toUpperCase()}</strong> ${v.tracker} — ${v.type}`;
+    const reason = v.details ? ` — ${v.details}` : "";
+    item.innerHTML = `<strong style="color:${severityColor(v.severity)}">${v.severity.toUpperCase()}</strong> ${v.tracker} — ${v.type}${reason}`;
     el.appendChild(item);
   }
 }
@@ -57,7 +56,8 @@ function setStatus(count, enabled) {
 }
 
 async function refreshUI() {
-  chrome.runtime.sendMessage({ type: "GET_STATE" }, (res) => {
+  getActiveTab().then((tab) => {
+    chrome.runtime.sendMessage({ type: "GET_STATE", tabId: tab?.id }, (res) => {
     if (!res) return;
     const settings = res.settings || {};
     const tabData = res.tabData || {};
@@ -65,11 +65,43 @@ async function refreshUI() {
     $("policy").value = settings.bannerPolicy || "eu_ca";
     $("retention").value = settings.retentionDays || 7;
     $("maxPages").value = settings.maxPagesPerDomain || 50;
+    $("llmTrackerToggle").checked = !!settings.llmTrackerEnabled;
+    $("policyToggle").checked = !!settings.policyAnalysisEnabled;
+    $("anthropicKey").value = settings.anthropicApiKey || "";
 
     setStatus((tabData.violations || []).length, settings.globalEnabled);
     $("banner").textContent = formatBanner(tabData.consentBanner);
     $("action").textContent = formatAction(tabData.consentBanner);
     renderViolations(tabData.violations || []);
+
+    const policyEl = $("policyResults");
+    policyEl.innerHTML = "";
+    const pa = tabData.policyAnalysis;
+    if (pa && pa.contradictions && pa.contradictions.length > 0) {
+      for (const c of pa.contradictions) {
+        const item = document.createElement("div");
+        item.style.marginBottom = "6px";
+        item.innerHTML = `<strong>${c.severity || "medium"}</strong> — ${c.claim} / ${c.actual_behavior}`;
+        policyEl.appendChild(item);
+      }
+    } else {
+      policyEl.textContent = "No policy analysis results.";
+    }
+
+    const statusEl = $("policyStatus");
+    if (statusEl) {
+      const ps = tabData.policyAnalysisStatus;
+      if (ps?.status === "running") {
+        statusEl.textContent = "Policy analysis running...";
+      } else if (ps?.status === "error") {
+        statusEl.textContent = ps.message || "Policy analysis error.";
+      } else if (ps?.status === "done") {
+        statusEl.textContent = "Policy analysis complete.";
+      } else {
+        statusEl.textContent = "";
+      }
+    }
+    });
   });
 }
 
@@ -132,9 +164,29 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("enableSite").addEventListener("click", enableOnThisSite);
-  $("clearData").addEventListener("click", () => chrome.runtime.sendMessage({ type: "CLEAR_TAB" }, refreshUI));
+  $("clearData").addEventListener("click", async () => {
+    const tab = await getActiveTab();
+    chrome.runtime.sendMessage({ type: "CLEAR_TAB", tabId: tab?.id }, refreshUI);
+  });
   $("exportReport").addEventListener("click", exportReport);
   $("importFile").addEventListener("change", (e) => handleImport(e.target.files[0]));
+  $("llmTrackerToggle").addEventListener("change", (e) => updateSettings({ llmTrackerEnabled: e.target.checked }));
+  $("policyToggle").addEventListener("change", (e) => updateSettings({ policyAnalysisEnabled: e.target.checked }));
+
+  $("runPolicy").addEventListener("click", async () => {
+    const tab = await getActiveTab();
+    chrome.runtime.sendMessage({ type: "RUN_POLICY_ANALYSIS", tabId: tab?.id }, (res) => {
+      if (res?.error) {
+        alert(res.error);
+      }
+    });
+  });
+
+  $("saveKeys").addEventListener("click", () => {
+    updateSettings({
+      anthropicApiKey: $("anthropicKey").value.trim()
+    });
+  });
 
   $("policy").addEventListener("change", (e) => updateSettings({ bannerPolicy: e.target.value }));
   $("retention").addEventListener("change", (e) => updateSettings({ retentionDays: Number(e.target.value) }));
