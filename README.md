@@ -13,6 +13,8 @@ Detects privacy violations when third-party trackers fire before consent. Lightw
 - Per-site enablement (on click / this site only)
 - JSON report export
 - Importable tracker database JSON
+- LLM analysis (Claude) with caching + fallback
+- Policy contradiction analysis (Claude) on demand
 
 ### Install (Developer Mode)
 1. Open Chrome → `chrome://extensions`
@@ -41,6 +43,12 @@ Default is **“this site only”**. Use the popup to grant site access:
 - MV3 limits access to full request payloads/headers.
 - “EU/CA” policy is a toggle only; no geolocation is performed.
 - eTLD+1 detection is heuristic (no public suffix list).
+- LLM analysis requires API keys and sends data to external providers.
+
+### LLM usage (what gets sent)
+- **Claude (tracker analysis)**: request URL, headers/cookies (if available), request type, and consent state.
+- **Claude (policy analysis)**: privacy policy text + observed tracker list for 30 seconds.
+- Both features are **opt-in** and initiated from the popup.
 
 ### What it detects
 - Pre-consent firing (trackers fire before user action)
@@ -64,4 +72,3 @@ chrome-extension/
 ├── tracker-database.js
 └── README.md
 ```
-
